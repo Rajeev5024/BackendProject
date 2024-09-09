@@ -3,6 +3,20 @@ import {ApiError} from "../utils/ApiError.js"
 import {User} from "../models/user.model.js"
 import {uploadOnCloudinary} from "../utils/cloudinary.js"
 import { ApiResponse } from "../utils/ApiResponse.js"
+
+const generateAccessAndRefreshToken=async(userId)=>{
+	try {
+		const user=await User.findById(userId);
+		const accessToken = user.generateAccessToken();
+		const refreshToken= user.generateRefreshToken();
+		user.refreshToken=refreshToken;
+		await user.save({validateBeforeSave:false});
+		return {refreshToken,accessToken};
+	} catch (error) {
+		throw new ApiError(500,"Something went wrong whlile generating access and refresh token")
+	}
+}
+
 const registerUser=asyncHandler(async (req,res)=>{
 	/*
 	1. get details from the frontend.
@@ -16,13 +30,13 @@ const registerUser=asyncHandler(async (req,res)=>{
 	9. return res.
 	*/
 
-	const {fullname, email, username,password}= req.body;
+	const {fullName, email, username,password}= req.body;
 
-	if([fullname, email, username,password].some((field)=> field.trim()==="")){
+	if([fullName, email, username,password].some((field)=> field.trim()==="")){
 		throw new ApiError(400,"all fields are required");
 	}
 
-	const existedUser=User.findOne({
+	const existedUser=await User.findOne({
 		$or:[{username},{email}]
 	})
 	if(existedUser){
@@ -30,7 +44,12 @@ const registerUser=asyncHandler(async (req,res)=>{
 	}
 
 	const avatarLocalPath= req.files?.avatar[0]?.path;
-	const coverImageLocalPath = req.files?.coverImage[0]?.path;
+	// const coverImageLocalPath = req.files?.coverImage[0]?.path;
+
+	let coverImageLocalPath;
+	if(req.files&&Array.isArray(req.files.coverImage)&&req.files.coverImage.length>0)
+		coverImageLocalPath=await uploadOnCloudinary(coverImageLocalPath);
+
 
 	if(!avatarLocalPath){
 		throw new ApiError(400,"avatar file is required");
@@ -39,13 +58,14 @@ const registerUser=asyncHandler(async (req,res)=>{
 	const avatar=await uploadOnCloudinary(avatarLocalPath);
 	const coverImage=await uploadOnCloudinary(coverImageLocalPath);
 
+	
 	if(!avatar){
 		throw new ApiError(400,"avatar file is required");
 	}
 
 	const user = await User.create({
 		username:username.toLowerCase(),
-		fullname,
+		fullName,
 		avatar:avatar.url,
 		email,
 		coverImage:coverImage?.url||"",
@@ -64,4 +84,86 @@ const registerUser=asyncHandler(async (req,res)=>{
 	
 })
 
-export {registerUser};
+const loginUser =asyncHandler(async(req,res,next)=>{
+	/*
+	1.ask data from the frontend
+	2.verify if the enterd data is correct or not (username or email )
+	3.generate tokens(access and refresh) for the user if the data enetred is correct
+	4.return res(success)//send cookie
+	{
+	1.req body ->data
+	2.username or email
+	2.find the user 
+	2password check
+	3access and refresh token
+	4send cookie}
+	*/
+
+	const {email,username,password}=req.body;
+	if(!username||!email){
+		throw new ApiError(400,"enter required details");
+	}
+	const user =await User.findOne({
+		$or:[{username},{email}]
+	})
+	if(!user){
+		throw new ApiError(404,"User not found!!")
+	}
+	const isValidPassword =await user.isPasswordCorrect(password);
+
+	if(!isValidPassword){
+		throw new ApiError(401, "Invalid user credentials");
+	}
+	
+	const {refreshToken, accessToken} =generateAccessAndRefreshToken(user._Id);
+
+	const loggedinUser = await User.findById(user._id).select("-password -refreshToken");
+
+	const options={
+		httpOnly:true,
+		secure:true,
+	}
+
+	return res
+	.status(201)
+	.cookie("accessToken",accessToken,options)
+	.cookie("refreshToken",refreshToken,options)
+	.json(
+		new ApiResponse(
+			200,
+			{
+				user:loggedinUser,
+				accessToken,
+				refreshToken,
+			},
+			"User loggedin successfully"
+		)
+	)
+
+})
+
+const logoutUser =asyncHandler(async(req,res)=>{
+	await User.findByIdAndUpdate(
+		req.user_id,
+		{
+			$set:{refreshToken:undefined}
+		},
+		{
+			new:true,
+		}
+	)
+	const options={
+		httpOnly:true,
+		secure:rue,
+	}
+
+	return res
+	.status(201)
+	.clearCookie("accessToken", accessToken,options)
+	.clearCookie("refreshToken", refreshToken,options)
+	.json(new ApiResponse(200,{},"Logged Out Successfully"))
+})
+
+
+
+export {registerUser,loginUser, logoutUser};
